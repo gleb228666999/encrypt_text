@@ -1,9 +1,14 @@
 import os
+import sqlite3
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QTextEdit, QFileDialog, QWidget, QMessageBox, QSpinBox, QTabWidget
+    QLabel, QLineEdit, QTextEdit, QFileDialog, QWidget, QMessageBox, QSpinBox, QTabWidget,
+    QInputDialog, QDialog, QFormLayout, QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtCore import Qt
+import random
+import string
+
 
 def encrypt_text(text, key, rounds=1):
     key_len = len(key)
@@ -11,11 +16,13 @@ def encrypt_text(text, key, rounds=1):
         text = ''.join(chr(ord(char) + ord(key[i % key_len])) for i, char in enumerate(text))
     return text
 
+
 def decrypt_text(text, key, rounds=1):
     key_len = len(key)
     for _ in range(rounds):
         text = ''.join(chr(ord(char) - ord(key[i % key_len])) for i, char in enumerate(text))
     return text
+
 
 def encrypt_file(input_file, output_file, key, rounds=1):
     key_bytes = key.encode('utf-8')
@@ -26,6 +33,7 @@ def encrypt_file(input_file, output_file, key, rounds=1):
             data = bytearray(byte ^ key_bytes[i % key_len] for i, byte in enumerate(data))
         outfile.write(data)
 
+
 def decrypt_file(input_file, output_file, key, rounds=1):
     key_bytes = key.encode('utf-8')
     key_len = len(key_bytes)
@@ -35,23 +43,130 @@ def decrypt_file(input_file, output_file, key, rounds=1):
             data = bytearray(byte ^ key_bytes[i % key_len] for i, byte in enumerate(data))
         outfile.write(data)
 
-class EncryptionApp(QMainWindow):
-    def __init__(self):
+
+class LoginDialog(QDialog):
+    def __init__(self, db):
         super().__init__()
+        self.db = db
+        self.setWindowTitle("Вход или регистрация")
+        self.username = None
         self.init_ui()
 
     def init_ui(self):
+        layout = QFormLayout()
+
+        self.username_input = QLineEdit()
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+
+        self.login_button = QPushButton("Войти")
+        self.register_button = QPushButton("Зарегистрироваться")
+
+        layout.addRow("Имя пользователя:", self.username_input)
+        layout.addRow("Пароль:", self.password_input)
+        layout.addRow(self.login_button, self.register_button)
+
+        self.setLayout(layout)
+
+        self.login_button.clicked.connect(self.login)
+        self.register_button.clicked.connect(self.register)
+
+    def login(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+        if self.db.check_user(username, password):
+            self.username = username
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Ошибка", "Неправильное имя пользователя или пароль")
+
+    def register(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+        if self.db.add_user(username, password):
+            QMessageBox.information(self, "Успех", "Пользователь зарегистрирован")
+        else:
+            QMessageBox.warning(self, "Ошибка", "Имя пользователя уже занято")
+
+
+class Database:
+    def __init__(self, db_name="users.db"):
+        self.conn = sqlite3.connect(db_name)
+        self.cursor = self.conn.cursor()
+        self.create_tables()
+
+    def create_tables(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password TEXT NOT NULL
+            )
+        """)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS keys (
+                username TEXT,
+                key_name TEXT,
+                key_value TEXT,
+                FOREIGN KEY(username) REFERENCES users(username)
+            )
+        """)
+        self.conn.commit()
+
+    def add_user(self, username, password):
+        try:
+            self.cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def check_user(self, username, password):
+        self.cursor.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password))
+        return self.cursor.fetchone() is not None
+
+    def save_key(self, username, key_name, key_value):
+        try:
+            self.cursor.execute("INSERT INTO keys (username, key_name, key_value) VALUES (?, ?, ?)", (username, key_name, key_value))
+            self.conn.commit()
+            print(f"Key {key_name} saved for user {username}")
+        except sqlite3.Error as e:
+            print(f"Error saving key: {e}")
+
+    def get_keys(self, username):
+        self.cursor.execute("SELECT key_name, key_value FROM keys WHERE username = ?", (username,))
+        return self.cursor.fetchall()
+
+
+class EncryptionApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.db = Database()
+        self.username = None
+        self.init_login()
+        self.init_ui()
+
+    def init_login(self):
+        login_dialog = LoginDialog(self.db)
+        if login_dialog.exec_() == QDialog.Accepted:
+            self.username = login_dialog.username
+        else:
+            exit()
+
+    def init_ui(self):
         self.setWindowTitle("Шифрование и расшифровка")
-        self.setGeometry(100, 100, 700, 600)
+        self.setGeometry(100, 100, 800, 600)
 
         self.tabs = QTabWidget(self)
         self.text_tab = QWidget()
         self.file_tab = QWidget()
+        self.keys_tab = QWidget()
         self.tabs.addTab(self.text_tab, "Текст")
         self.tabs.addTab(self.file_tab, "Файлы")
+        self.tabs.addTab(self.keys_tab, "Ключи")
 
         self.init_text_tab()
         self.init_file_tab()
+        self.init_keys_tab()
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.tabs)
@@ -62,130 +177,150 @@ class EncryptionApp(QMainWindow):
     def init_text_tab(self):
         layout = QVBoxLayout()
 
-        # Поля для работы с текстом
-        self.text_input_label = QLabel("Введите текст:")
-        self.text_input = QTextEdit()
-        self.key_label = QLabel("Введите ключ:")
-        self.key_input = QLineEdit()
-        self.rounds_label = QLabel("Количество кругов шифрования:")
+        self.input_text = QTextEdit()
+        self.output_text = QTextEdit()
         self.rounds_input = QSpinBox()
         self.rounds_input.setMinimum(1)
+        self.rounds_input.setMaximum(10)
         self.rounds_input.setValue(1)
-        self.text_result = QTextEdit()
-        self.text_result.setReadOnly(True)
 
-        # Кнопки
-        self.encrypt_text_btn = QPushButton("Зашифровать текст")
-        self.decrypt_text_btn = QPushButton("Расшифровать текст")
+        encrypt_button = QPushButton("Зашифровать текст")
+        decrypt_button = QPushButton("Расшифровать текст")
 
-        # Добавление элементов в макет
-        layout.addWidget(self.text_input_label)
-        layout.addWidget(self.text_input)
-        layout.addWidget(self.key_label)
-        layout.addWidget(self.key_input)
-        layout.addWidget(self.rounds_label)
+        layout.addWidget(QLabel("Введите текст:"))
+        layout.addWidget(self.input_text)
+        layout.addWidget(QLabel("Количество кругов шифрования:"))
         layout.addWidget(self.rounds_input)
-        layout.addWidget(self.encrypt_text_btn)
-        layout.addWidget(self.decrypt_text_btn)
+        layout.addWidget(encrypt_button)
+        layout.addWidget(decrypt_button)
         layout.addWidget(QLabel("Результат:"))
-        layout.addWidget(self.text_result)
+        layout.addWidget(self.output_text)
 
         self.text_tab.setLayout(layout)
 
-        # Подключение сигналов
-        self.encrypt_text_btn.clicked.connect(self.encrypt_text)
-        self.decrypt_text_btn.clicked.connect(self.decrypt_text)
+        encrypt_button.clicked.connect(self.encrypt_text_action)
+        decrypt_button.clicked.connect(self.decrypt_text_action)
 
     def init_file_tab(self):
         layout = QVBoxLayout()
 
-        # Поля для работы с файлами
-        self.file_path_input = QLineEdit()
-        self.file_path_input.setPlaceholderText("Выберите файл")
-        self.select_file_btn = QPushButton("Выбрать файл")
-        self.file_key_input = QLineEdit()
-        self.file_key_input.setPlaceholderText("Введите ключ")
-        self.rounds_label_file = QLabel("Количество кругов шифрования:")
-        self.rounds_input_file = QSpinBox()
-        self.rounds_input_file.setMinimum(1)
-        self.rounds_input_file.setValue(1)
+        self.file_input = QLineEdit()
+        self.file_input.setPlaceholderText("Выберите файл для шифрования")
+        self.rounds_file_input = QSpinBox()
+        self.rounds_file_input.setMinimum(1)
+        self.rounds_file_input.setMaximum(10)
+        self.rounds_file_input.setValue(1)
 
-        # Кнопки
-        self.encrypt_file_btn = QPushButton("Зашифровать файл")
-        self.decrypt_file_btn = QPushButton("Расшифровать файл")
+        browse_button = QPushButton("Обзор")
+        encrypt_button = QPushButton("Зашифровать файл")
+        decrypt_button = QPushButton("Расшифровать файл")
 
-        # Добавление элементов в макет
-        layout.addWidget(QLabel("Выберите файл:"))
-        layout.addWidget(self.file_path_input)
-        layout.addWidget(self.select_file_btn)
-        layout.addWidget(self.file_key_input)
-        layout.addWidget(self.rounds_label_file)
-        layout.addWidget(self.rounds_input_file)
-        layout.addWidget(self.encrypt_file_btn)
-        layout.addWidget(self.decrypt_file_btn)
+        layout.addWidget(QLabel("Файл:"))
+        layout.addWidget(self.file_input)
+        layout.addWidget(browse_button)
+        layout.addWidget(QLabel("Количество кругов шифрования:"))
+        layout.addWidget(self.rounds_file_input)
+        layout.addWidget(encrypt_button)
+        layout.addWidget(decrypt_button)
 
         self.file_tab.setLayout(layout)
 
-        # Подключение сигналов
-        self.select_file_btn.clicked.connect(self.select_file)
-        self.encrypt_file_btn.clicked.connect(self.encrypt_file)
-        self.decrypt_file_btn.clicked.connect(self.decrypt_file)
+        browse_button.clicked.connect(self.browse_file)
+        encrypt_button.clicked.connect(self.encrypt_file_action)
+        decrypt_button.clicked.connect(self.decrypt_file_action)
 
-    def encrypt_text(self):
-        text = self.text_input.toPlainText()
-        key = self.key_input.text()
-        rounds = self.rounds_input.value()
-        if not text or not key:
-            QMessageBox.warning(self, "Ошибка", "Введите текст и ключ!")
-            return
-        encrypted = encrypt_text(text, key, rounds)
-        self.text_result.setText(encrypted)
+    def init_keys_tab(self):
+        layout = QVBoxLayout()
 
-    def decrypt_text(self):
-        text = self.text_input.toPlainText()
-        key = self.key_input.text()
-        rounds = self.rounds_input.value()
-        if not text or not key:
-            QMessageBox.warning(self, "Ошибка", "Введите текст и ключ!")
-            return
-        decrypted = decrypt_text(text, key, rounds)
-        self.text_result.setText(decrypted)
+        self.keys_table = QTableWidget()
+        self.keys_table.setColumnCount(2)
+        self.keys_table.setHorizontalHeaderLabels(["Название ключа", "Ключ"])
 
-    def select_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл", "", "Все файлы (*)")
-        if file_path:
-            self.file_path_input.setText(file_path)
+        self.load_keys_button = QPushButton("Загрузить ключи")
+        self.generate_key_button = QPushButton("Сгенерировать ключ")
+        self.save_key_button = QPushButton("Сохранить ключ")
 
-    def encrypt_file(self):
-        file_path = self.file_path_input.text()
-        key = self.file_key_input.text()
-        rounds = self.rounds_input_file.value()
-        if not file_path or not key:
-            QMessageBox.warning(self, "Ошибка", "Выберите файл и введите ключ!")
-            return
-        output_file = file_path + ".enc"
-        try:
-            encrypt_file(file_path, output_file, key, rounds)
-            QMessageBox.information(self, "Успех", f"Файл зашифрован и сохранён как {output_file}.")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось зашифровать файл: {e}")
+        layout.addWidget(self.keys_table)
+        layout.addWidget(self.load_keys_button)
+        layout.addWidget(self.generate_key_button)
+        layout.addWidget(self.save_key_button)
 
-    def decrypt_file(self):
-        file_path = self.file_path_input.text()
-        key = self.file_key_input.text()
-        rounds = self.rounds_input_file.value()
-        if not file_path or not key:
-            QMessageBox.warning(self, "Ошибка", "Выберите файл и введите ключ!")
-            return
-        output_file = file_path + ".dec"
-        try:
-            decrypt_file(file_path, output_file, key, rounds)
-            QMessageBox.information(self, "Успех", f"Файл расшифрован и сохранён как {output_file}.")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось расшифровать файл: {e}")
+        self.keys_tab.setLayout(layout)
 
-if __name__ == "__main__":
+        self.load_keys_button.clicked.connect(self.load_keys_action)
+        self.generate_key_button.clicked.connect(self.generate_key_action)
+        self.save_key_button.clicked.connect(self.save_key_action)
+
+    def load_keys_action(self):
+        if self.username:
+            keys = self.db.get_keys(self.username)
+            self.keys_table.setRowCount(0)
+            for key_name, key_value in keys:
+                row_position = self.keys_table.rowCount()
+                self.keys_table.insertRow(row_position)
+                self.keys_table.setItem(row_position, 0, QTableWidgetItem(key_name))
+                self.keys_table.setItem(row_position, 1, QTableWidgetItem(key_value))
+
+    def generate_key_action(self):
+        key_name, ok = QInputDialog.getText(self, "Название ключа", "Введите название ключа:")
+        if ok:
+            key_value = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+            self.keys_table.insertRow(self.keys_table.rowCount())
+            self.keys_table.setItem(self.keys_table.rowCount() - 1, 0, QTableWidgetItem(key_name))
+            self.keys_table.setItem(self.keys_table.rowCount() - 1, 1, QTableWidgetItem(key_value))
+
+    def save_key_action(self):
+        key_name = self.keys_table.item(self.keys_table.currentRow(), 0).text()
+        key_value = self.keys_table.item(self.keys_table.currentRow(), 1).text()
+        if key_name and key_value and self.username:
+            self.db.save_key(self.username, key_name, key_value)
+
+    def encrypt_text_action(self):
+        text = self.input_text.toPlainText()
+        key, ok = QInputDialog.getText(self, "Введите ключ", "Введите ключ для шифрования:")
+        if ok:
+            rounds = self.rounds_input.value()
+            encrypted_text = encrypt_text(text, key, rounds)
+            self.output_text.setPlainText(encrypted_text)
+
+    def decrypt_text_action(self):
+        text = self.input_text.toPlainText()
+        key, ok = QInputDialog.getText(self, "Введите ключ", "Введите ключ для расшифровки:")
+        if ok:
+            rounds = self.rounds_input.value()
+            decrypted_text = decrypt_text(text, key, rounds)
+            self.output_text.setPlainText(decrypted_text)
+
+    def browse_file(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Выбрать файл", "", "Все файлы (*)")
+        if filename:
+            self.file_input.setText(filename)
+
+    def encrypt_file_action(self):
+        file = self.file_input.text()
+        key, ok = QInputDialog.getText(self, "Введите ключ", "Введите ключ для шифрования:")
+        if ok:
+            rounds = self.rounds_file_input.value()
+            output_file = file + ".encrypted"
+            encrypt_file(file, output_file, key, rounds)
+            QMessageBox.information(self, "Успех", f"Файл зашифрован и сохранен как {output_file}")
+
+    def decrypt_file_action(self):
+        file = self.file_input.text()
+        key, ok = QInputDialog.getText(self, "Введите ключ", "Введите ключ для расшифровки:")
+        if ok:
+            rounds = self.rounds_file_input.value()
+            output_file = file + ".decrypted"
+            decrypt_file(file, output_file, key, rounds)
+            QMessageBox.information(self, "Успех", f"Файл расшифрован и сохранен как {output_file}")
+
+
+def main():
     app = QApplication([])
     window = EncryptionApp()
     window.show()
-    app.exec()
+    app.exec_()
+
+
+if __name__ == "__main__":
+    main()
